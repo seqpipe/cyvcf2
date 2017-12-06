@@ -901,6 +901,8 @@ cdef class Variant(object):
     cdef float *_gt_gls
     cdef readonly INFO INFO
     cdef int _ploidy
+    cdef int _gt_idxs_size
+    cdef int _gt_alt_size
     cdef list _genotypes
 
     cdef readonly int POS
@@ -914,6 +916,8 @@ cdef class Variant(object):
         self._gt_phased = NULL
         self._gt_pls = NULL
         self._ploidy = -1
+        self._gt_idxs_size = 1
+        self._gt_alt_size = -1
 
     def __repr__(self):
         return "Variant(%s:%d %s/%s)" % (self.CHROM, self.POS, self.REF, ",".join(self.ALT))
@@ -1263,6 +1267,7 @@ cdef class Variant(object):
                 self._gt_phased = <int *>stdlib.malloc(sizeof(int) * self.vcf.n_samples)
                 ngts = bcf_get_genotypes(self.vcf.hdr, self.b, &self._gt_types, &ndst)
                 nper = ndst / self.vcf.n_samples
+                self._gt_idxs_size = ndst
                 self._ploidy = nper
                 self._gt_idxs = <int *>stdlib.malloc(sizeof(int) * self.vcf.n_samples * nper)
                 if ndst == 0 or nper == 0:
@@ -1285,6 +1290,44 @@ cdef class Variant(object):
             cdef np.npy_intp shape[1]
             shape[0] = <np.npy_intp> self.vcf.n_samples
             return np.PyArray_SimpleNewFromData(1, shape, np.NPY_INT32, self._gt_types)
+
+    property gt_idxs:
+        """gt_types returns a numpy array indicating the type of each sample.
+
+        HOM_REF=0, HET=1. For `gts012=True` HOM_ALT=2, UKNOWN=3
+        """
+        def __get__(self):
+            cdef int ndst = 0, ngts, n, i, nper, j = 0, k = 0
+            cdef int a
+            if self.vcf.n_samples == 0:
+                return np.array([])
+            if self._gt_types == NULL:
+                self._gt_phased = <int *>stdlib.malloc(sizeof(int) * self.vcf.n_samples)
+                ngts = bcf_get_genotypes(self.vcf.hdr, self.b, &self._gt_types, &ndst)
+                nper = ndst / self.vcf.n_samples
+                self._gt_idxs_size = ndst
+                self._ploidy = nper
+                self._gt_idxs = <int *>stdlib.malloc(sizeof(int) * self.vcf.n_samples * nper)
+                if ndst == 0 or nper == 0:
+                    return np.array([])
+                for i in range(0, ndst, nper):
+                    for k in range(i, i + nper):
+                        a = self._gt_types[k]
+                        if a >= 0:
+                            self._gt_idxs[k] = bcf_gt_allele(a)
+                        else:
+                            self._gt_idxs[k] = a
+
+                    self._gt_phased[j] = self._gt_types[i] > 0 and <int>bcf_gt_is_phased(self._gt_types[i+1])
+                    j += 1
+
+                if self.vcf.gts012:
+                    n = as_gts012(self._gt_types, self.vcf.n_samples, nper, self.vcf.strict_gt)
+                else:
+                    n = as_gts(self._gt_types, self.vcf.n_samples, nper, self.vcf.strict_gt)
+            cdef np.npy_intp shape[1]
+            shape[0] = <np.npy_intp> self._gt_idxs_size
+            return np.PyArray_SimpleNewFromData(1, shape, np.NPY_INT32, self._gt_idxs)
 
     property ploidy:
         """get the ploidy of each sample for the given record."""
@@ -1439,12 +1482,12 @@ cdef class Variant(object):
                         stdlib.free(self._gt_alt_depths); self._gt_alt_depths = NULL
                         return (-1 + np.zeros(self.vcf.n_samples, np.int32))
 
-                    for i in range(0, nret, nper):
-                        self._gt_alt_depths[j] = self._gt_alt_depths[i+1]
+                    #for i in range(0, nret, nper):
+                        #self._gt_alt_depths[j] = self._gt_alt_depths[i+1]
                         # add up all the alt alleles
-                        for k in range(2, nper):
-                            self._gt_alt_depths[j] += self._gt_alt_depths[i+k]
-                        j += 1
+                        #for k in range(2, nper):
+                        #    self._gt_alt_depths[j] += self._gt_alt_depths[i+k]
+                        #j += 1
 
                 elif nret == -1:
                     # Freebayes
@@ -1453,14 +1496,16 @@ cdef class Variant(object):
                     if nret < 0:
                         stdlib.free(self._gt_alt_depths); self._gt_alt_depths = NULL
                         return -1 + np.zeros(self.vcf.n_samples, np.int32)
-                    for i in range(0, nret, nper):
-                        self._gt_alt_depths[j] = self._gt_alt_depths[i]
-                        for k in range(1, nper):
-                            self._gt_alt_depths[j] += self._gt_alt_depths[i+k]
-                        j += 1
+                    #for i in range(0, nret, nper):
+                        #self._gt_alt_depths[j] = self._gt_alt_depths[i]
+                        #for k in range(1, nper):
+                        #    self._gt_alt_depths[j] += self._gt_alt_depths[i+k]
+                        #j += 1
                 else:
                     stdlib.free(self._gt_alt_depths); self._gt_alt_depths = NULL
                     return -1 + np.zeros(self.vcf.n_samples, np.int32)
+                
+                self._gt_alt_size = nret
 
                 # TODO: add new vcf standard.
             for i in range(self.vcf.n_samples):
@@ -1468,7 +1513,7 @@ cdef class Variant(object):
                     self._gt_alt_depths[i] = -1
 
             cdef np.npy_intp shape[1]
-            shape[0] = <np.npy_intp> self.vcf.n_samples
+            shape[0] = <np.npy_intp> self._gt_alt_size
             return np.PyArray_SimpleNewFromData(1, shape, np.NPY_INT32, self._gt_alt_depths)
 
     property gt_alt_freqs:
