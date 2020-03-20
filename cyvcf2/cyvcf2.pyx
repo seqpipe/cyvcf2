@@ -1434,10 +1434,7 @@ cdef class Variant(object):
             return np.PyArray_SimpleNewFromData(1, shape, np.NPY_INT32, self._gt_types)
 
     property gt_idxs:
-        """gt_types returns a numpy array indicating the type of each sample.
-
-        HOM_REF=0, HET=1. For `gts012=True` HOM_ALT=2, UKNOWN=3
-        """
+        """gt_idxs returns a numpy array for each sample indicating the genotype and phasing."""
         def __get__(self):
             cdef int ndst = 0, ngts, n, i, nper, j = 0, k = 0
             cdef int a
