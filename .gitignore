@@ -1,7 +1,10 @@
 *.pyc
+cyvcf2.egg-info/
 build
 dist
 *.so
+cyvcf2/cyvcf2.c
+htslib/config.h.in~
 *.so.1
 *.swp
 htslib/test
@@ -13,3 +16,5 @@ libhts.a
 _build
 _static
 _templates
+setup-requires/*
+.cache/v/cache/lastfailed

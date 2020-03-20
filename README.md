@@ -73,14 +73,30 @@ Installation
 pip install cyvcf2
 ```
 
-## github
+## github (building htslib and cyvcf2 from source)
 
 ```
-git clone https://github.com/brentp/cyvcf2
-cd cyvcf2
-pip install --editable .
+git clone --recursive https://github.com/brentp/cyvcf2
+cd cyvcf2/htslib
+autoheader
+autoconf
+./configure --enable-libcurl
+make
+
+cd ..
+pip install -e .
 ```
 
+On **OSX**, using brew, you may have to set the following as indicated by the brew install:
+
+```
+For compilers to find openssl you may need to set:
+  export LDFLAGS="-L/usr/local/opt/openssl/lib"
+  export CPPFLAGS="-I/usr/local/opt/openssl/include"
+
+For pkg-config to find openssl you may need to set:
+  export PKG_CONFIG_PATH="/usr/local/opt/openssl/lib/pkgconfig"
+```
 
 Testing
 =======

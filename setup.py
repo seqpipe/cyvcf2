@@ -49,7 +49,7 @@ def install_requirements(specifiers):
         subprocess.call(cmd)
 
 
-requires = ['cython', 'numpy']
+requires = ['cython', 'numpy', 'coloredlogs', 'click']
 install_requirements(missing_requirements(requires))
 
 
@@ -61,18 +61,20 @@ sources = [x for x in sources if not x.endswith(('htsfile.c', 'tabix.c', 'bgzip.
 sources.append('cyvcf2/helpers.c')
 
 import numpy as np
+import platform
 from Cython.Distutils import build_ext
 
 cmdclass = {'build_ext': build_ext}
 extension = [Extension("cyvcf2.cyvcf2",
                         ["cyvcf2/cyvcf2.pyx"] + sources,
-                        libraries=['z'],
+                        libraries=['z', 'bz2', 'lzma', 'curl', 'ssl'] + (['crypt'] if platform.system() != 'Darwin' else []),
                         include_dirs=['htslib', 'cyvcf2', np.get_include()])]
 
 
 setup(
     name="cyvcf2",
     description="fast vcf parsing with cython + htslib",
+    long_description_content_type="text/markdown",
     url="https://github.com/brentp/cyvcf2/",
     long_description=open("README.md").read(),
     license="MIT",

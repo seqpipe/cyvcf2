@@ -7,7 +7,7 @@
 #define _UNKNOWN 3
 
 // internal calculate of alternate allele frequency.
-inline float aaf(int *gt_types, int32_t n_samples){
+static inline float aaf(int *gt_types, int32_t n_samples){
 	float af = 0;
 	int i, n_called = 0;
 
@@ -133,25 +133,42 @@ int related(int *gt_types, double *asum, int32_t *N, int32_t *ibs0, int32_t *ibs
 	return n_used;
 }
 
+// returns 1 if this is a usable site.
+static inline int ab_ok(double ab, int ab_missing) {
+    if (ab_missing) {
+        return 1;
+    }
+    return ab >= 0.2 && ab <= 0.8;
+}
+
 // implementation of the relatedness calculation in king.
-// ibs is n_samples * n_samples. the upper diag stores ibs0, the lower diag stores number of shared hets
-// n is n_samples * n_samples. upper stores the number of times that each pair was used.
-//                             lower diag stores the ibs2.
+// ibs is n_samples * n_samples. the lower diag stores ibs0, the lower diag stores number of shared hets
+// n is n_samples * n_samples. lower stores the number of times that each pair was used.
+//                             upper diag stores the ibs2.
 // hets is n_samples it counts the number of hets per sample.
 // IBS0: (AA, aa) and (aa, AA)
 // IBS1: 1 _HET, 1 HOM_{REF,ALT} : not calculated (shared-hets is used instead)
 // IBS2: samples are same (even unphased hets)
-int krelated(int32_t *gt_types, int32_t *ibs, int32_t *n, int32_t *hets, int32_t n_samples) {
+int krelated(int32_t *gt_types, int32_t *ibs, int32_t *n, int32_t *hets, int32_t n_samples, double *ab) {
 	int32_t j, k;
 	int n_used = 0;
 	int32_t gtj, gtk;
 	int is_het = 0;
-	hets[n_samples - 1] += (gt_types[n_samples -1] == _HET);
+    // check if we have any values with an AB. If not, then the site can still be usable.
+    int ab_missing = 1;
+    for (j = 0; j <n_samples; j++) {
+        if(ab[j] >= 0) {
+            ab_missing = 0;
+            break;
+        }
+    }
+	hets[n_samples - 1] += (gt_types[n_samples -1] == _HET && ab_ok(ab[n_samples - 1], ab_missing));
 
 	for(j=0; j<n_samples-1; j++){
 		if(gt_types[j] == _UNKNOWN){ continue; }
 		gtj = gt_types[j];
 		is_het = (gtj == _HET);
+		if(is_het && !ab_ok(ab[j], ab_missing)) { continue; }
 		hets[j] += is_het;
 		n_used++;
 		for(k=j+1; k<n_samples; k++){
@@ -160,7 +177,7 @@ int krelated(int32_t *gt_types, int32_t *ibs, int32_t *n, int32_t *hets, int32_t
 			n[j * n_samples + k]++;
 			if(is_het) {
 				// shared hets
-				ibs[k * n_samples + j] += (gtk == _HET); // already know gtj is _HET
+				ibs[k * n_samples + j] += (gtk == _HET && ab_ok(ab[k], ab_missing)); // already know gtj is _HET
 			} else {
 				// only need to check these if sample 1 isn't het.
 				// ibs0

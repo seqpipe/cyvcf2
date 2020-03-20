@@ -9,7 +9,8 @@ cdef extern from "relatedness.h":
     float r_unphased(int32_t *a_gts, int32_t *b_gts, float f, int32_t n_samples)
     int ibd(int agt, int bgt, int run_length, float pi, int *bins, int32_t n_bins)
 
-    int krelated(int32_t *gt_types, int32_t *ibs, int32_t *n, int32_t *hets, int32_t n_samples)
+    int krelated(int32_t *gt_types, int32_t *ibs, int32_t *n, int32_t *hets,
+            int32_t n_samples, double *ab)
 
 cdef extern from "helpers.h":
     int as_gts(int32_t *gts, int num_samples, int ploidy, int strict_gt);
@@ -24,9 +25,13 @@ cdef extern from "htslib/kstring.h":
 
     inline char *ks_release(kstring_t *s)
 
-cdef extern from "htslib/hts.h":
+cdef extern from "htslib/hfile.h":
     ctypedef struct hFILE:
         pass
+    hFILE *hdopen(int fd, const char *mode);
+
+cdef extern from "htslib/hts.h":
+
 
     int hts_set_threads(htsFile *fp, int n);
 
@@ -50,6 +55,8 @@ cdef extern from "htslib/hts.h":
 
     htsFile *hts_open(char *fn, char *mode);
 
+    htsFile *hts_hopen(hFILE *fp, const char *fn, const char *mode);
+
     cdef int hts_verbose = 1
 
     ctypedef struct hts_itr_t:
@@ -59,6 +66,7 @@ cdef extern from "htslib/hts.h":
         pass
 
     hts_idx_t *bcf_index_load(char *fn)
+    hts_idx_t *hts_idx_load2(const char *fn, const char *fnidx);
 
     #int hts_itr_next(BGZF *fp, hts_itr_t *iter, void *r, void *data);
     void hts_itr_destroy(hts_itr_t *iter);
@@ -70,6 +78,7 @@ cdef extern from "htslib/tbx.h":
         pass
 
     tbx_t *tbx_index_load(const char *fn);
+    tbx_t *tbx_index_load2(const char *fn, const char *fnidx);
     hts_itr_t *tbx_itr_queryi(tbx_t *tbx, int tid, int beg, int end)
     hts_itr_t *tbx_itr_querys(tbx_t *tbx, char *reg) nogil
     int tbx_itr_next(htsFile *fp, tbx_t *tbx, hts_itr_t *iter, void *data) nogil;
@@ -208,12 +217,17 @@ cdef extern from "htslib/vcf.h":
         kstring_t mem;
 
 
+    void bcf_float_set(float *ptr, uint32_t value)
     bint bcf_float_is_missing(float f)
     bint bcf_float_is_vector_end(float f)
 
     void bcf_destroy(bcf1_t *v);
     bcf1_t * bcf_init() nogil;
     int vcf_parse(kstring_t *s, const bcf_hdr_t *h, bcf1_t *v) nogil;
+    int bcf_subset_format(const bcf_hdr_t *hdr, bcf1_t *rec);
+
+    int bcf_update_alleles(const bcf_hdr_t *hdr, bcf1_t *line, const char **alleles, int nals);
+    int bcf_update_alleles_str(const bcf_hdr_t *hdr, bcf1_t *line, const char *alleles_string);
 
     bcf_hdr_t *bcf_hdr_read(htsFile *fp);
 
@@ -221,6 +235,8 @@ cdef extern from "htslib/vcf.h":
     int bcf_hdr_nsamples(const bcf_hdr_t *hdr);
     void bcf_hdr_destroy(const bcf_hdr_t *hdr)
     char *bcf_hdr_fmt_text(const bcf_hdr_t *hdr, int is_bcf, int *len);
+    bcf_hdr_t *bcf_hdr_init(const char *mode);
+    int bcf_hdr_parse(bcf_hdr_t *hdr, char *htxt);
 
     int bcf_write(htsFile *fp, const bcf_hdr_t *h, bcf1_t *v);
     int bcf_hdr_write(htsFile *fp, bcf_hdr_t *h);
@@ -274,6 +290,8 @@ cdef extern from "htslib/vcf.h":
     int bcf_update_format(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const void *values, int n, int type);
     int bcf_update_format_int32(const bcf_hdr_t * hdr, bcf1_t * line, const char * key, const void * values, int n)
     int bcf_update_format_float(const bcf_hdr_t * hdr, bcf1_t * line, const char * key, const void * values, int n)
+    int bcf_update_format_string(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const char **values, int n);
+    int bcf_update_format_char(const bcf_hdr_t *hdr, bcf1_t *line, const char *key, const char**values, int n);
 
     int bcf_add_id(const bcf_hdr_t *hdr, bcf1_t *line, const char *id);
     int bcf_update_id(const bcf_hdr_t *hdr, bcf1_t *line, const char *id);

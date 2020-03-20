@@ -1,8 +1,8 @@
 #cython: profile=False
+
 #cython: embedsignature=True
 from __future__ import print_function
 import os
-import os.path as op
 import sys
 from collections import defaultdict
 import atexit
@@ -29,7 +29,6 @@ from cpython.version cimport PY_MAJOR_VERSION
 import inspect
 if not hasattr(sys.modules[__name__], '__file__'):
     __file__ = inspect.getfile(inspect.currentframe())
-
 
 
 def par_relatedness(vcf_path, samples, ncpus, sites, min_depth=5, each=1):
@@ -99,6 +98,7 @@ def _par_relatedness(args):
     np.savez_compressed(fname, ibs=np.asarray(vibs), hets=np.asarray(vhet), n=np.asarray(vn))
     return fname
 
+
 cdef unicode xstr(s):
     if type(s) is unicode:
         # fast path for most common case(s)
@@ -114,8 +114,10 @@ cdef unicode xstr(s):
     else:
         raise TypeError(...)
 
+
 def r_(int32_t[::view.contiguous] a_gts, int32_t[::view.contiguous] b_gts, float f, int32_t n_samples):
     return r_unphased(&a_gts[0], &b_gts[0], f, n_samples)
+
 
 cdef set_constants(VCF v):
     v.HOM_REF = 0
@@ -126,6 +128,7 @@ cdef set_constants(VCF v):
     else:
         v.UNKNOWN = 2
         v.HOM_ALT = 3
+
 
 cdef class VCF:
     """
@@ -175,12 +178,19 @@ cdef class VCF:
     cdef readonly int UNKNOWN
 
     def __init__(self, fname, mode="r", gts012=False, lazy=False, strict_gt=False, samples=None, threads=None):
-        if fname == b"-" or fname == "-":
-            fname = b"/dev/stdin"
-        if not op.exists(fname):
-            raise Exception("bad path: %s" % fname)
-        fname, mode = to_bytes(fname), to_bytes(mode)
-        self.hts = hts_open(fname, mode)
+        cdef hFILE *hf
+
+        if isinstance(fname, basestring):
+            if fname == b"-" or fname == "-":
+                fname = b"/dev/stdin"
+            fname, mode = to_bytes(fname), to_bytes(mode)
+            self.hts = hts_open(fname, mode)
+            self.fname = fname
+        else:
+            mode = to_bytes(mode)
+            hf = hdopen(int(fname), mode)
+            self.hts = hts_hopen(hf, "<file>", mode)
+
         if self.hts == NULL:
             raise IOError("Error opening %s" % fname)
         if self.hts.format.format != vcf and self.hts.format.format != bcf:
@@ -192,7 +202,6 @@ cdef class VCF:
             self.set_samples(samples)
         self.n_samples = bcf_hdr_nsamples(self.hdr)
         self.PASS = -1
-        self.fname = to_bytes(fname)
         self.gts012 = gts012
         self.lazy = lazy
         self.strict_gt = strict_gt
@@ -211,9 +220,8 @@ cdef class VCF:
     cdef get_type(self, fmt):
         fmt = from_bytes(fmt)
         if not fmt in self.format_types:
-            s = self[fmt]
+            s = self.get_header_type(fmt, order=[BCF_HL_FMT])
             self.format_types[fmt] = s["Type"]
-
         return from_bytes(self.format_types[fmt])
 
     def add_to_header(self, line):
@@ -280,7 +288,7 @@ cdef class VCF:
         ret = bcf_hdr_set_samples(self.hdr, <const char *>samples, 0)
         assert ret >= 0, ("error setting samples", ret)
         if ret != 0 and samples != "-":
-            s = samples.split(",")
+            s = from_bytes(samples).split(",")
             if ret < len(s):
                 sys.stderr.write("warning: not all requested samples found in VCF\n")
 
@@ -307,6 +315,13 @@ cdef class VCF:
         if ret != 0:
             raise Exception("unable to update to header")
 
+    def set_index(self, index_path=""):
+        self.hidx = hts_idx_load2(to_bytes(self.fname), to_bytes(index_path))
+        if self.hidx == NULL:
+            self.idx = tbx_index_load2(to_bytes(self.fname), to_bytes(index_path))
+        if self.hidx == NULL and self.idx == NULL:
+          raise OSError("unable to open index:'%s' for '%s'" % (index_path, self.fname))
+
     def _bcf_region(VCF self, region):
         if self.hidx == NULL:
             self.hidx = bcf_index_load(self.fname)
@@ -326,11 +341,14 @@ cdef class VCF:
                 if ret < 0:
                     bcf_destroy(b)
                     break
+                if bcf_subset_format(self.hdr, b) != 0:
+                    sys.stderr.write("could not subset variant")
+                    bcf_destroy(b)
+                    break
                 yield newVariant(b, self)
         finally:
             if itr != NULL:
                 hts_itr_destroy(itr)
-
 
     def __call__(VCF self, region=None):
         """
@@ -354,11 +372,6 @@ cdef class VCF:
             raise StopIteration
 
         if self.idx == NULL:
-            if not (op.exists(from_bytes(self.fname)+ ".tbi") or
-                    op.exists(from_bytes(self.fname) + ".csi")):
-                raise Exception("can't extract region without tabix or csi index for %s" % self.fname)
-
-
             self.idx = tbx_index_load(to_bytes(self.fname))
             assert self.idx != NULL, "error loading tabix index for %s" % self.fname
 
@@ -376,23 +389,25 @@ cdef class VCF:
             sys.stderr.write("no intervals found for %s at %s\n" % (self.fname, region))
             raise StopIteration
 
-        while 1:
-            with nogil:
-                slen = tbx_itr_next(self.hts, self.idx, itr, &s)
-                if slen > 0:
-                        b = bcf_init()
-                        ret = vcf_parse(&s, self.hdr, b)
-            if slen <= 0:
-                break
-            if ret > 0:
-                bcf_destroy(b)
-                stdlib.free(s.s)
-                hts_itr_destroy(itr)
-                raise Exception("error parsing")
-            yield newVariant(b, self)
+        try:
+            while 1:
+                with nogil:
+                    slen = tbx_itr_next(self.hts, self.idx, itr, &s)
+                    if slen > 0:
+                            b = bcf_init()
+                            ret = vcf_parse(&s, self.hdr, b)
+                if slen <= 0:
+                    break
+                if ret > 0:
+                    bcf_destroy(b)
+                    stdlib.free(s.s)
+                    hts_itr_destroy(itr)
+                    raise Exception("error parsing")
+                yield newVariant(b, self)
+        finally:
+            stdlib.free(s.s)
+            hts_itr_destroy(itr)
 
-        stdlib.free(s.s)
-        hts_itr_destroy(itr)
 
     def header_iter(self):
         """
@@ -434,7 +449,7 @@ cdef class VCF:
         return {sample_pairs[i]: bins[i, :] for i in range(len(sample_pairs))}
 
     # pull something out of the HEADER, e.g. CSQ
-    def __getitem__(self, key):
+    cpdef get_header_type(self, key, order=[BCF_HL_INFO, BCF_HL_FMT]):
         """Extract a field from the VCF header by id.
 
         Parameters
@@ -447,10 +462,12 @@ cdef class VCF:
             dictionary containing header information.
         """
         key = to_bytes(key)
-        cdef bcf_hrec_t *b = bcf_hdr_get_hrec(self.hdr, BCF_HL_INFO, b"ID", key, NULL);
+        cdef bcf_hrec_t *b
         cdef int i
-        if b == NULL:
-            b = bcf_hdr_get_hrec(self.hdr, BCF_HL_FMT, b"ID", key, NULL);
+        for typ in order:
+            b = bcf_hdr_get_hrec(self.hdr, typ, b"ID", key, NULL);
+            if b != NULL:
+                break
         if b == NULL:
             b = bcf_hdr_get_hrec(self.hdr, BCF_HL_GEN, key, NULL, NULL);
             if b == NULL:
@@ -460,6 +477,9 @@ cdef class VCF:
             d =  {from_bytes(b.keys[i]): from_bytes(b.vals[i]) for i in range(b.nkeys)}
         #bcf_hrec_destroy(b)
         return d
+
+    def __getitem__(self, key):
+        return self.get_header_type(key)
 
     def __contains__(self, key):
         """Check if the given ID is in the header."""
@@ -495,6 +515,8 @@ cdef class VCF:
 
         cdef bcf1_t *b
         cdef int ret
+        if self.hts == NULL:
+            raise Exception("attempt to iterate over closed/invalid VCF")
         with nogil:
             b = bcf_init()
             ret = bcf_read(self.hts, self.hdr, b)
@@ -522,6 +544,9 @@ cdef class VCF:
             if len(self._seqlens) > 0: return self._seqlens
             cdef int32_t nseq;
             cdef int32_t* sls = bcf_hdr_seqlen(self.hdr, &nseq)
+            if sls == NULL or nseq <= 0:
+              raise AttributeError("no sequence lengths found in header")
+
             self._seqlens = [sls[i] for i in range(nseq)]
             stdlib.free(sls)
             return self._seqlens
@@ -539,8 +564,7 @@ cdef class VCF:
                 if self.hidx != NULL:
                     cnames = bcf_index_seqnames(self.hidx, self.hdr, &n)
             elif n == 0:
-                if self.idx == NULL and (op.exists(from_bytes(self.fname)+ ".tbi") or
-                        op.exists(from_bytes(self.fname) + ".csi")):
+                if self.idx == NULL:
                     self.idx = tbx_index_load(to_bytes(self.fname))
                 if self.idx !=NULL:
                     cnames = tbx_seqnames(self.idx, &n)
@@ -560,7 +584,6 @@ cdef class VCF:
         for row in riter:
           row['jtags'] = '|'.join(row['tags'])
           df.append(row)
-
 
         df = pd.DataFrame(df)
         fig = plt.figure(figsize=(9, 9))
@@ -611,52 +634,49 @@ cdef class VCF:
             if isinstance(sites, basestring):
                 isites = []
                 for i in (x.strip().split(":") for x in open(sites)):
-                    # handle 'chr' prefix on incoming.
                     if not i[0] in seqnames and 'chr' + i[0] in seqnames:
                         i[0] = 'chr' + i[0]
                     i[1] = int(i[1])
                     isites.append(i)
             else:
                 isites = sites
+                for i in isites:
+                    if not i[0] in seqnames and 'chr' + i[0] in seqnames:
+                        i[0] = 'chr' + i[0]
 
         cdef Variant v
         cdef int k, last_pos
         if sites:
             isites = isites[offset::each]
-            def gen():
-                ref, alt = None, None
-                j = 0
-                for i, osite in enumerate(isites):
-                    if len(osite) >= 4:
-                        chrom, pos, ref, alt = osite[:4]
-                    else:
-                        chrom, pos = osite[:2]
-                    for v in self("%s:%s-%s" % (chrom, pos, pos)):
-                        if len(v.ALT) != 1: continue
-                        if ref is not None:
-                            if v.REF != ref: continue
-                            if alt is not None:
-                                if v.ALT[0] != alt: continue
-                        if v.call_rate < call_rate: continue
-                        yield i, v
-                        j += 1
-                        break
-        else:
-            def gen():
-                last_pos, k = -10000, 0
-                for v in self:
-                    if abs(v.POS - last_pos) < 5000: continue
-                    if len(v.REF) != 1: continue
+            ref, alt = None, None
+            j = 0
+            for i, osite in enumerate(isites):
+                if len(osite) >= 4:
+                    chrom, pos, ref, alt = osite[:4]
+                else:
+                    chrom, pos = osite[:2]
+                for v in self("%s:%s-%s" % (chrom, pos, pos)):
                     if len(v.ALT) != 1: continue
-                    if v.call_rate < 0.5: continue
-                    if not 0.03 < v.aaf < 0.6: continue
-                    if np.mean(v.gt_depths > 7) < 0.5: continue
-                    last_pos = v.POS
-                    if k >= offset and k % each == 0:
-                        yield k, v
-                    k += 1
-                    if k > 20000: break
-        return gen
+                    if ref is not None and v.REF != ref: continue
+                    if alt is not None and v.ALT[0] != alt: continue
+                    if v.call_rate < call_rate: continue
+                    yield i, v
+                    j += 1
+                    break
+        else:
+            last_pos, k = -10000, 0
+            for v in self:
+                if abs(v.POS - last_pos) < 5000: continue
+                if len(v.REF) != 1: continue
+                if len(v.ALT) != 1: continue
+                if v.call_rate < 0.5: continue
+                if not 0.03 < v.aaf < 0.6: continue
+                if np.mean(v.gt_depths > 7) < 0.5: continue
+                last_pos = v.POS
+                if k >= offset and k % each == 0:
+                    yield k, v
+                k += 1
+                if k > 20000: break
 
     def het_check(self, min_depth=8, percentiles=(10, 90), _finish=True,
                   int each=1, int offset=0,
@@ -675,10 +695,9 @@ cdef class VCF:
 
         mean_depths = []
 
-        gen = self.gen_variants(sites, each=each, offset=offset)
         maf_lists = defaultdict(list)
         idxs = np.arange(n_samples)
-        for i, v in gen():
+        for i, v in self.gen_variants(sites, each=each, offset=offset):
             if v.CHROM in ('X', 'chrX'): break
             if v.aaf < 0.01: continue
             if v.call_rate < 0.5: continue
@@ -732,13 +751,11 @@ cdef class VCF:
 
             return sample_ranges, sites, np.transpose(all_gt_types)
 
-
     def site_relatedness(self, sites=None,
                          min_depth=5, each=1):
 
         vibs, vn, vhet = self._site_relatedness(sites=sites, min_depth=min_depth, each=each)
         return self._relatedness_finish(vibs, vn, vhet)
-
 
     cdef _site_relatedness(self, sites=None,
             int min_depth=5, int each=1, int offset=0):
@@ -753,25 +770,26 @@ cdef class VCF:
         cdef int k, i
         assert each >= 0
 
-        gen = self.gen_variants(sites, offset=offset, each=each)
 
         cdef int32_t[:, ::view.contiguous] ibs = np.zeros((n_samples, n_samples), np.int32)
         cdef int32_t[:, ::view.contiguous] n = np.zeros((n_samples, n_samples), np.int32)
         cdef int32_t[:] hets = np.zeros((n_samples, ), np.int32)
         cdef int32_t[:] gt_types = np.zeros((n_samples, ), np.int32)
         cdef int32_t[:] depths = np.zeros((n_samples, ), np.int32)
+        cdef double[:] alt_freqs = np.zeros((n_samples,), np.double)
 
         cdef Variant v
 
-        for j, (i, v) in enumerate(gen()):
+        for j, (i, v) in enumerate(self.gen_variants(sites, offset=offset, each=each)):
             gt_types = v.gt_types
-            krelated(&gt_types[0], &ibs[0, 0], &n[0, 0], &hets[0], n_samples)
+            alt_freqs = v.gt_alt_freqs
+            krelated(&gt_types[0], &ibs[0, 0], &n[0, 0], &hets[0], n_samples,
+                    &alt_freqs[0])
 
         return ibs, n, hets
 
     def relatedness(self, int n_variants=35000, int gap=30000, float min_af=0.04,
                     float max_af=0.8, float linkage_max=0.2, min_depth=8):
-
         cdef Variant v
 
         cdef int last = -gap, nv = 0, nvt=0
@@ -872,6 +890,117 @@ cdef class VCF:
                 res['n'].append(_n[sj, sk])
         return res
 
+cdef class Allele(object):
+    cdef int32_t *_raw
+    cdef int i
+
+    cdef int _value(self):
+        if self._raw[self.i] < 0: return self._raw[self.i]
+        return (self._raw[self.i] >> 1) - 1
+
+    @property
+    def phased(self):
+        return self._raw[self.i] & 1 == 1
+
+    @phased.setter
+    def phased(self, bint ph):
+        if ph:
+            self._raw[self.i] = (self._value() + 1)<<1|1
+        else:
+            self._raw[self.i] = (self._value() + 1)<<1
+
+    @property
+    def value(self):
+        if self._raw[self.i] < 0: return self._raw[self.i]
+        return (self._raw[self.i] >> 1) - 1
+
+    @value.setter
+    def value(self, int value):
+        if value < 0:
+            self._raw[self.i] = value
+            return
+        if self.phased:
+            self._raw[self.i] = (value + 1)<<1|1
+        else:
+            self._raw[self.i] = (value + 1)<<1
+
+    def __repr__(self):
+        if self.value < 0: return "."
+        return str(self.value) + ("|" if self.phased else "/")
+
+cdef inline Allele newAllele(int32_t *raw, int i):
+    cdef Allele a = Allele.__new__(Allele)
+    a._raw = raw
+    a.i = i
+    return a
+
+cdef class Genotypes(object):
+    cdef int32_t *_raw
+    cdef readonly int n_samples
+    cdef readonly int ploidy
+    def __cinit__(self):
+        self.ploidy = 0
+        self.n_samples = 0
+        self._raw = NULL
+    def __dealloc__(self):
+        if self._raw != NULL:
+            stdlib.free(self._raw)
+
+    def phased(self, int i):
+        """
+        a boolean indicating that the ith sample is phased.
+        """
+        return (self._raw[i * self.ploidy + 1] & 1) == 1
+
+    def alleles(self, int i):
+        cdef list result = []
+        cdef int32_t v
+        for j in range(self.ploidy):
+            v = self._raw[i * self.ploidy + j]
+            result.append((v >> 1) - 1)
+        return result
+
+    def array(Genotypes self):
+        """
+        array returns an int16 numpy array  of shape n_samples, (ploidy + 1).
+        The last column indicates phased (1 is phased, 0 is unphased).
+        The other columns indicate the alleles, e.g. [0, 1, 1] is 0|1.
+        """
+        cdef np.int16_t* to_return = <np.int16_t *>stdlib.malloc(sizeof(np.int16_t)
+                                                   * self.n_samples
+                                                   * (self.ploidy+1))
+
+        cdef int ind
+        cdef int allele
+        cdef int p = self.ploidy + 1
+
+        for ind in range(self.n_samples):
+            for allele in range(self.ploidy):
+                to_return[ind * p + allele] = (self._raw[ind * self.ploidy + allele] >> 1) - 1
+            to_return[ind * p + self.ploidy] = (self._raw[ind * self.ploidy + 1] & 1) == 1
+
+        cdef np.npy_intp shape[2]
+        shape[0] = self.n_samples
+        shape[1] = self.ploidy + 1
+        return np.PyArray_SimpleNewFromData(
+            2,
+            shape,
+            np.NPY_INT16,
+            to_return
+        )
+
+    def __getitem__(self, int i):
+        ## return the Allele objects for the i'th sample.
+        cdef int k
+        return [newAllele(self._raw, k) for k in range(i*self.ploidy,(i+1)*self.ploidy)]
+
+cdef inline Genotypes newGenotypes(int32_t *raw, int ploidy, int n_samples):
+    cdef Genotypes gs = Genotypes.__new__(Genotypes)
+    gs._raw = raw
+    gs.ploidy = ploidy
+    gs.n_samples = n_samples
+    return gs
+
 cdef class Variant(object):
     """
     Variant represents a single VCF Record.
@@ -960,34 +1089,33 @@ cdef class Variant(object):
         "numpy array indicating the alleles in each sample."
         def __get__(self):
             cdef np.ndarray gt_types = self.gt_types
-            cdef int i, n = self.ploidy, j=0, k
+            cdef int i, n = self.ploidy, j=-1, a, b
             cdef char **alleles = self.b.d.allele
             #cdef dict d = {i:alleles[i] for i in range(self.b.n_allele)}
             cdef list d = [from_bytes(alleles[i]) for i in range(self.b.n_allele)]
             d.append(".") # -1 gives .
-            cdef list a = []
-            cdef list phased = list(self.gt_phases)
+            cdef list bases = ["./." for _ in range(self.vcf.n_samples)]
+            cdef np.ndarray phased = self.gt_phases
             cdef list lookup = ["/", "|"]
             cdef int unknown = 3 if self.vcf.gts012 else 2
             for i in range(0, n * self.vcf.n_samples, n):
+                j += 1
                 if n == 2:
                     if (gt_types[j] == unknown) and (not self.vcf.strict_gt):
-                        a.append("./.")
+                        continue
                     else:
-                        try:
-                            d[self._gt_idxs[i+1]]
-                            a.append(d[self._gt_idxs[i]] + lookup[phased[j]] + d[self._gt_idxs[i+1]])
-                        except IndexError:
-                            a.append(d[self._gt_idxs[i]])
+                        a = self._gt_idxs[i]
+                        b = self._gt_idxs[i + 1]
+                        if a >= -1 and b >= -1:
+                          bases[j] = d[a] + lookup[phased[j]] + d[b]
+                        else:
+                          bases[j] = d[a]
                 elif n == 1:
-                    a.append(d[self._gt_idxs[i]])
+                    bases[j] = d[self._gt_idxs[i]]
                 else:
                     raise Exception("gt_bases not implemented for ploidy > 2")
 
-                j += 1
-            return np.array(a, np.str)
-
-
+            return np.array(bases, np.str)
 
     def relatedness(self,
                     int32_t[:, ::view.contiguous] ibs,
@@ -997,10 +1125,12 @@ cdef class Variant(object):
             raise Exception("must call relatedness with gts012")
         if self._gt_types == NULL:
             self.gt_types
-        return krelated(<int32_t *>self._gt_types, &ibs[0, 0], &n[0, 0], &hets[0], self.vcf.n_samples)
+        cdef double[:] alt_freqs = self.gt_alt_freqs
+        return krelated(<int32_t *>self._gt_types, &ibs[0, 0], &n[0, 0],
+                &hets[0], self.vcf.n_samples, &alt_freqs[0])
 
     property num_called:
-        "number of samples that were not UKNOWN."
+        "number of samples that were not UNKNOWN."
         def __get__(self):
             if self._gt_types == NULL:
                 self.gt_types
@@ -1016,7 +1146,7 @@ cdef class Variant(object):
             return n
 
     property call_rate:
-        "proprtion of samples that were not UKNOWN."
+        "proprtion of samples that were not UNKNOWN."
         def __get__(self):
             if self.vcf.n_samples > 0:
                 return float(self.num_called) / self.vcf.n_samples
@@ -1154,14 +1284,28 @@ cdef class Variant(object):
         stdlib.free(buf)
         return iret
 
+    @property
+    def genotype(self):
+        if self.vcf.n_samples == 0: return None
+        cdef int32_t *gts = NULL
+        cdef int ndst = 0
+        if bcf_get_genotypes(self.vcf.hdr, self.b, &gts, &ndst) <= 0:
+            raise Exception("couldn't get genotypes for variant")
+        return newGenotypes(gts, ndst/self.vcf.n_samples, self.vcf.n_samples)
+
+    @genotype.setter
+    def genotype(self, Genotypes g):
+        cdef int ret = bcf_update_genotypes(self.vcf.hdr, self.b, g._raw, self.vcf.n_samples * g.ploidy)
+        if ret < 0:
+            raise Exception("error setting genotypes with: %s" % g)
+
     property genotypes:
         """genotypes returns a list for each sample Indicating the allele and phasing.
 
         e.g. [0, 1, True] corresponds to 0|1
-        while [1, 2, False] corresponds to 1|2
+        while [1, 2, False] corresponds to 1/2
         """
         def __get__(self):
-
             if self.vcf.n_samples == 0: return None
             if self._genotypes is not None:
               return self._genotypes
@@ -1178,6 +1322,7 @@ cdef class Variant(object):
             for i in range(n_samples):
               k = i * nret
               for j in range(nret):
+                  #assert k + j < ndst
                   if bcf_gt_is_missing(gts[k + j]):
                       self._genotypes[i].append(-1)
                       continue
@@ -1185,7 +1330,7 @@ cdef class Variant(object):
                       break
                   self._genotypes[i].append(bcf_gt_allele(gts[k + j]))
               self._genotypes[i].append(
-                    bool(bcf_gt_is_phased(gts[k+1])))
+                    bool(bcf_gt_is_phased(gts[k+1 if k+1 < ndst else k])))
 
             stdlib.free(gts)
             return self._genotypes
@@ -1194,26 +1339,23 @@ cdef class Variant(object):
             cdef int n_samples = self.vcf.n_samples
             if len(gts) != n_samples:
                 raise Exception("genotypes: must set with a number of gts equal the number of samples in the vcf")
-
-            cdef int * cgts = <int *>stdlib.malloc(sizeof(int) * 2 * n_samples)
-            cdef int i
-            #XXXX
+            elif len(gts) == 0:
+                nret = 0
+            else:
+                nret = max(len(gt)-1 for gt in gts)
+            cdef int * cgts = <int *>stdlib.malloc(sizeof(int) * nret * n_samples)
+            cdef int i, j, k
             self._genotypes = None
-            for i in range(n_samples):
-                if gts[i][-1]:
-                    cgts[2*i] = bcf_gt_phased(gts[i][0])
-                    if len(gts[i]) > 2:
-                        cgts[2*i+1] = bcf_gt_phased(gts[i][1])
-                    else:
-                        cgts[2*i+1] = bcf_int32_vector_end #bcf_gt_phased(-1)
-                else:
-                    cgts[2*i] = bcf_gt_unphased(gts[i][0])
-                    if len(gts[i]) > 2:
-                        cgts[2*i+1] = bcf_gt_unphased(gts[i][1])
-                    else:
-                        cgts[2*i+1] = bcf_int32_vector_end #bcf_gt_unphased(-1)
 
-            ret = bcf_update_genotypes(self.vcf.hdr, self.b, cgts, n_samples * 2)
+            for i in range(n_samples):
+                k = i * nret
+                for j in range(nret):
+                    if j == len(gts[i]) - 1:
+                        cgts[k + j] = bcf_int32_vector_end #bcf_gt_phased(-1)
+                        break
+                    else:
+                        cgts[k + j] = bcf_gt_phased(gts[i][j]) if gts[i][-1] else bcf_gt_unphased(gts[i][j])
+            ret = bcf_update_genotypes(self.vcf.hdr, self.b, cgts, n_samples * nret)
             if ret < 0:
                 raise Exception("error setting genotypes with: %s" % gts)
             stdlib.free(cgts)
@@ -1256,7 +1398,7 @@ cdef class Variant(object):
     property gt_types:
         """gt_types returns a numpy array indicating the type of each sample.
 
-        HOM_REF=0, HET=1. For `gts012=True` HOM_ALT=2, UKNOWN=3
+        HOM_REF=0, HET=1. For `gts012=True` HOM_ALT=2, UNKNOWN=3
         """
         def __get__(self):
             cdef int ndst = 0, ngts, n, i, nper, j = 0, k = 0
@@ -1465,7 +1607,6 @@ cdef class Variant(object):
             shape[0] = <np.npy_intp> self.vcf.n_samples
             return np.PyArray_SimpleNewFromData(1, shape, np.NPY_INT32, self._gt_ref_depths)
 
-
     property gt_alt_depths:
         """get the count of alternate reads as a numpy array."""
         def __get__(self):
@@ -1523,7 +1664,7 @@ cdef class Variant(object):
                 return []
             t = np.array(self.gt_depths, np.float)
             a = np.array(self.gt_alt_depths, np.float)
-            
+
             # for which samples are the alt or total depths unknown?
             tU = t < 0
             aU = a < 0
@@ -1542,8 +1683,7 @@ cdef class Variant(object):
             clean = ~tU & ~aU & ~t0
             alt_freq[clean] = (a[clean] / t[clean])
 
-            return alt_freq        
-
+            return alt_freq
 
     property gt_quals:
         """get the GQ for each sample as a numpy array."""
@@ -1589,7 +1729,7 @@ cdef class Variant(object):
             return depth
 
     property gt_phases:
-        """get a boolean indicating wether each sample is phased as a numpy array."""
+        """get a boolean indicating whether each sample is phased as a numpy array."""
         def __get__(self):
             # run for side-effect
             if self._gt_phased == NULL:
@@ -1599,17 +1739,30 @@ cdef class Variant(object):
 
             return np.PyArray_SimpleNewFromData(1, shape, np.NPY_INT32, self._gt_phased).astype(bool)
 
-
     property REF:
         "the reference allele."
         def __get__(self):
             return self.b.d.allele[0].decode()
+
+        def __set__(self, ref):
+          # int bcf_update_alleles_str(const bcf_hdr_t *hdr, bcf1_t *line, const char *alleles_string);
+          alleles = (ref + "," + ",".join(self.ALT)).encode()
+          if bcf_update_alleles_str(self.vcf.hdr, self.b, alleles) != 0:
+            raise ValueError("couldn't set reference to:" + str(ref))
 
     property ALT:
         "the list of alternate alleles."
         def __get__(self):
             cdef int i
             return [self.b.d.allele[i].decode() for i in range(1, self.b.n_allele)]
+
+        def __set__(self, alts):
+          # int bcf_update_alleles_str(const bcf_hdr_t *hdr, bcf1_t *line, const char *alleles_string);
+          if not isinstance(alts, list):
+            alts = [alts]
+          alleles = (self.REF + "," + ",".join(alts)).encode()
+          if bcf_update_alleles_str(self.vcf.hdr, self.b, alleles) != 0:
+            raise ValueError("couldn't set alternates to:" + str(alts))
 
     property is_snp:
         "boolean indicating if the variant is a SNP."
@@ -1619,7 +1772,7 @@ cdef class Variant(object):
             for i in range(1, self.b.n_allele):
                 if not self.b.d.allele[i] in (b"A", b"C", b"G", b"T"):
                     return False
-            return True
+            return self.b.n_allele > 1
 
     property is_indel:
         "boolean indicating if the variant is an indel."
@@ -1642,7 +1795,7 @@ cdef class Variant(object):
     property is_transition:
         "boolean indicating if the variant is a transition."
         def __get__(self):
-            if len(self.ALT) > 1: return False
+            if len(self.ALT) != 1: return False
 
             if not self.is_snp: return False
             ref = self.REF
@@ -1743,7 +1896,10 @@ cdef class Variant(object):
                 raise Exception("not able to set ID: %s", value)
 
     property FILTER:
-        "the value of FILTER from the VCF field."
+        """the value of FILTER from the VCF field.
+
+        a value of PASS in the VCF will give None for this function
+        """
         def __get__(self):
             cdef int i
             cdef int n = self.b.d.n_flt
@@ -1781,11 +1937,19 @@ cdef class Variant(object):
                 return None
             return q
 
+        def __set__(self, value):
+            if value is None:
+                bcf_float_set(&self.b.qual, bcf_float_missing)
+            else:
+                self.b.qual = value
+
+
 cdef inline HREC newHREC(bcf_hrec_t *hrec, bcf_hdr_t *hdr):
     cdef HREC h = HREC.__new__(HREC)
     h.hdr = hdr
     h.hrec = hrec
     return h
+
 
 cdef class HREC(object):
     cdef bcf_hdr_t *hdr
@@ -1833,6 +1997,7 @@ cdef class HREC(object):
 
     def __repr__(self):
         return str(self.info())
+
 
 cdef class INFO(object):
     """
@@ -2000,6 +2165,7 @@ cdef bcf_array_to_object(void *data, int type, int n, int scalar=0):
 
     return value
 
+
 cdef inline Variant newVariant(bcf1_t *b, VCF vcf):
     cdef Variant v = Variant.__new__(Variant)
     v.b = b
@@ -2017,10 +2183,12 @@ cdef inline Variant newVariant(bcf1_t *b, VCF vcf):
     v.INFO = i
     return v
 
+
 cdef to_bytes(s, enc=ENC):
     if not isinstance(s, bytes):
         return s.encode(enc)
     return s
+
 
 cdef from_bytes(s):
     if isinstance(s, bytes):
@@ -2052,9 +2220,13 @@ cdef class Writer(VCF):
     cdef bint header_written
     cdef const bcf_hdr_t *ohdr
 
-    def __init__(Writer self, fname, VCF tmpl):
+    def __init__(Writer self, fname, VCF tmpl, mode="w"):
         self.name = to_bytes(fname)
-        self.hts = hts_open(self.name, "w")
+        if fname.endswith(".gz") and mode == "w":
+            mode = "wz"
+        if fname.endswith(".bcf") and mode == "w":
+            mode = "wb"
+        self.hts = hts_open(self.name, to_bytes(mode))
         if self.hts == NULL:
             raise Exception("error opening file: %s" % self.name)
 
@@ -2064,10 +2236,49 @@ cdef class Writer(VCF):
         bcf_hdr_sync(self.hdr)
         self.header_written = False
 
+    @classmethod
+    def from_string(Writer cls, fname, header_string, mode="w"):
+        cdef Writer self = Writer.__new__(Writer)
+
+        self.name = to_bytes(fname)
+        if fname.endswith(".gz") and mode == "w":
+            mode = "wz"
+        if fname.endswith(".bcf") and mode == "w":
+            mode = "wb"
+        self.hts = hts_open(self.name, to_bytes(mode))
+        cdef char *hmode = "w"
+        self.hdr = bcf_hdr_init(hmode)
+        self.ohdr = bcf_hdr_dup(self.hdr)
+        if bcf_hdr_parse(self.hdr, to_bytes(header_string)) != 0:
+            raise Exception("error parsing header:" + header_string)
+        if bcf_hdr_sync(self.hdr) != 0:
+            raise Exception("error syncing header:" + header_string)
+        self.header_written = False
+        self.n_samples = bcf_hdr_nsamples(self.hdr)
+        return self
+
+    def variant_from_string(self, variant_string):
+        cdef bcf1_t *b = bcf_init()
+        cdef kstring_t s
+        tmp = to_bytes(variant_string)
+        s.s = tmp
+        s.l = len(variant_string)
+        s.m = len(variant_string)
+        ret = vcf_parse(&s, self.hdr, b)
+        if ret > 0:
+            bcf_destroy(b)
+            raise Exception("error parsing:" + variant_string + " return value:" + ret)
+
+        var = newVariant(b, self)
+        if var.b.errcode == BCF_ERR_CTG_UNDEF:
+            self.add_to_header("##contig=<ID=%s>" % var.CHROM)
+            var.b.errcode = 0
+        return var
+
     def write_header(Writer self):
         bcf_hdr_write(self.hts, self.hdr)
         self.header_written = True
-        
+
     def write_record(Writer self, Variant var):
         "Write the variant to the writer."
         cdef bcf_hrec_t *h
@@ -2083,7 +2294,7 @@ cdef class Writer(VCF):
         elif var.b.errcode != 0:
             raise Exception("variant to be written has errorcode: %d" % var.b.errcode)
         return bcf_write(self.hts, self.hdr, var.b)
-    
+
     def close(Writer self):
         if not self.header_written:
             self.write_header()

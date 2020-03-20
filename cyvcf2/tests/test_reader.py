@@ -41,6 +41,26 @@ def test_format_str():
     f = next(vcf).format("RULE")
     assert list(f) == ['F2,F3,F4', 'G2,G3,G4']
 
+"""
+def test_write_format_str():
+    vcf = VCF(os.path.join(HERE, "test-format-string.vcf"))
+    wtr = Writer("x.vcf", vcf)
+    variant = next(vcf)
+    variant.set_format("TSTRING", np.array(["asdfxx","35\0"]))
+    wtr.write_record(variant)
+    wtr.close()
+    assert "asdfxx" in str(variant), str(variant)
+    assert "35" in str(variant)
+    """
+
+def test_missing_samples():
+    samples = ['101976-101976', 'sample_not_in_vcf']
+    vcf = VCF(VCF_PATH, gts012=True, samples=samples)
+    assert len(vcf.samples) == 1
+    vcf.close()
+    samples = '101976-101976,sample_not_in_vcf'
+    vcf = VCF(VCF_PATH, gts012=True, samples=samples)
+    assert len(vcf.samples) == 1
 
 def test_ibd():
     samples = ['101976-101976', '100920-100920', '100231-100231']
@@ -76,7 +96,7 @@ def test_pls():
 
 def test_gt_alt_freqs():
     vcf = VCF(VCF_ALTFREQ_PATH)
-    
+
     v = next(vcf)
     assert v.gt_alt_freqs[0] == 0.2
     assert v.gt_alt_freqs[1] == 1.0
@@ -202,6 +222,21 @@ def test_format_field():
     for v in vcf:
         assert isinstance(v.FORMAT, list)
 
+def test_writer_from_string():
+
+    header = """##fileformat=VCFv4.1
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##contig=<ID=chr2,length=249250621,assembly=hg19>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	samplea
+"""
+
+    w = Writer.from_string("out.vcf", header)
+    w.write_header()
+    v = w.variant_from_string("chr1\t234\t.\tA\tC\t40\tPASS\t.\tGT\t0/0")
+    w.write_record(v)
+    w.close()
+
+
 def test_writer():
 
     v = VCF(VCF_PATH)
@@ -322,10 +357,17 @@ def test_seqnames():
     v = VCF(VCF_PATH)
     assert v.seqnames ==  [u'1', u'2', u'3', u'4', u'5', u'6', u'7', u'8', u'9', u'10', u'11', u'12', u'13', u'14', u'15', u'16', u'17', u'18', u'19', u'20', u'21', u'22', u'X', u'Y', u'MT', u'GL000207.1', u'GL000226.1', u'GL000229.1', u'GL000231.1', u'GL000210.1', u'GL000239.1', u'GL000235.1', u'GL000201.1', u'GL000247.1', u'GL000245.1', u'GL000197.1', u'GL000203.1', u'GL000246.1', u'GL000249.1', u'GL000196.1', u'GL000248.1', u'GL000244.1', u'GL000238.1', u'GL000202.1', u'GL000234.1', u'GL000232.1', u'GL000206.1', u'GL000240.1', u'GL000236.1', u'GL000241.1', u'GL000243.1', u'GL000242.1', u'GL000230.1', u'GL000237.1', u'GL000233.1', u'GL000204.1', u'GL000198.1', u'GL000208.1', u'GL000191.1', u'GL000227.1', u'GL000228.1', u'GL000214.1', u'GL000221.1', u'GL000209.1', u'GL000218.1', u'GL000220.1', u'GL000213.1', u'GL000211.1', u'GL000199.1', u'GL000217.1', u'GL000216.1', u'GL000215.1', u'GL000205.1', u'GL000219.1', u'GL000224.1', u'GL000223.1', u'GL000195.1', u'GL000212.1', u'GL000222.1', u'GL000200.1', u'GL000193.1', u'GL000194.1', u'GL000225.1', u'GL000192.1', u'NC_007605', u'hs37d5', u'phix'], v.seqnames
 
-    b = VCF('{}/test.snpeff.bcf'.format(HERE))
+    b = VCF('{}/test.snpeff.bcf'.format(HERE), threads=3)
     assert b.seqnames[0] == 'chr1', b.seqnames
     assert b.seqnames[-1] == 'chrY', b.seqnames
 
+def test_different_index():
+    b = VCF('{}/test.snpeff.bcf'.format(HERE), threads=3)
+    b.set_index("cyvcf2/tests/test-diff.csi")
+    s = 0
+    for r in b("chr1:69427-69429"):
+        s += 1
+    assert s == 1
 
 def test_var_type():
     v = VCF(VCF_PATH)
@@ -551,15 +593,25 @@ def test_set_format_float():
     obs = fmap(float, get_gt_str(v, "PS"))
     assert allclose(obs, [9998.555, 99911.111]), obs
 
-def test_set_format_int():
+def test_set_format_int_a():
     vcf = VCF('{}/test-format-string.vcf'.format(HERE))
     assert vcf.add_format_to_header(dict(ID="PI", Number=1, Type="Integer", Description="Int example")) == 0
     v = next(vcf)
     v.set_format("PI", np.array([5, 1], dtype=np.int))
     assert allclose(fmap(float, get_gt_str(v, "PI")), [5, 1])
 
+def test_set_format_int_b():
+    vcf = VCF('{}/test-format-string.vcf'.format(HERE))
+    assert vcf.add_format_to_header(dict(ID="PI", Number=1, Type="Integer", Description="Int example")) == 0
+    v = next(vcf)
+
     v.set_format("PI", np.array([855, 11], dtype=np.int64))
     assert allclose(fmap(float, get_gt_str(v, "PI")), [855, 11])
+
+def test_set_format_int_c():
+    vcf = VCF('{}/test-format-string.vcf'.format(HERE))
+    assert vcf.add_format_to_header(dict(ID="PI", Number=1, Type="Integer", Description="Int example")) == 0
+    v = next(vcf)
 
     v.set_format("PI", np.array([9998, 99911], dtype=np.int32))
     obs = fmap(float, get_gt_str(v, "PI"))
@@ -592,6 +644,16 @@ def test_set_gts():
 
     v.genotypes = [[2, 2, True], [0, 2, True]]
     assert get_gt_str(v) == ["2|2", "0|2"]
+
+    v.genotypes = [[0, 1, 2, False], [1, 2, True]]
+    s = get_gt_str(v)
+    assert s == ["0/1/2", "1|2"]
+
+    v.genotypes = [[1, 2, False], [0, 1, 2, True]]
+    assert get_gt_str(v) == ["1/2", "0|1|2"]
+
+    v.genotypes = [[0, 1, 2, False], [0, 1, 2, True]]
+    assert get_gt_str(v) == ["0/1/2", "0|1|2"]
 
 def test_info_del():
     vcf = VCF(os.path.join(HERE, "test-hemi.vcf"))
@@ -634,6 +696,65 @@ def test_access_gts():
 
     v = next(vcf)
     assert v.genotypes == [[-1, True], [0, 2, True]], v.genotypes
+
+def test_access_genotype():
+    vcf = VCF('{}/test-format-string.vcf'.format(HERE))
+    v = next(vcf)
+    gts = v.genotype
+    #print(str(v), file=sys.stderr)
+
+    # indexing directly gives a list of Allele objects (for diploid, the list
+    # has length 2)
+    alleles = gts[0]
+    assert alleles[0].value == 0
+    assert alleles[1].value == 0
+    assert alleles[0].phased == False
+
+    alleles = gts[1]
+    assert alleles[0].value == 1
+    assert alleles[1].value == 1
+    assert alleles[1].phased == True
+
+    assert np.all(gts.array()[:, :2] == np.array([[0, 0], [1, 1]]))
+    assert np.all(gts.array()[:, 2] == np.array([False, True]))
+
+    assert alleles[1].phased == True
+    alleles[1].phased = False
+    assert alleles[1].phased == False
+    alleles = gts[1]
+    assert alleles[1].phased == False
+
+    assert np.all(gts.array()[:, 2] == np.array([False, False]))
+
+    # can also just get the phased stats of the nth sample:
+    assert gts.phased(0) == False
+    # note this got updated above
+    assert gts.phased(1) == False
+
+    # and the alleles of the nth sample.
+    assert gts.alleles(0) == [0, 0]
+    #print(gts.alleles(1), file=sys.stderr)
+    assert gts.alleles(1) == [1, 1]
+
+
+    alleles = gts[0]
+    assert alleles[0].value == 0
+    alleles[0].value = 1
+    assert alleles[0].value == 1
+    alleles = gts[0]
+    assert alleles[0].value == 1
+    assert alleles[0].phased == False
+
+    assert np.all(gts.array()[:, :2] == np.array([[1, 0], [1, 1]]))
+
+    gts[1][0].value = 0
+
+    assert np.all(gts.array()[:, :2] == np.array([[1, 0], [0, 1]]))
+
+    # update the varint
+    v.genotype = gts
+    assert "1/0:6728,1:F	0/1:22,1:G" in str(v)
+
 
 def test_alt_homozygous_gt():
     vcf = VCF(os.path.join(HERE, "test-multiallelic-homozygous-alt.vcf.gz"))
@@ -683,10 +804,10 @@ def test_issue44():
     w.close()
     #           "./."            "."          ".|."           "0|0"
     expected = [[-1, -1, False], [-1, False], [-1, -1, True], [0, 0, True]]
-    print("", file=sys.stderr)
+    #print("", file=sys.stderr)
     for i, v in enumerate(VCF('__o.vcf')):
         #print(v.genotypes, file=sys.stderr)
-        assert v.genotypes == [expected[i]], (v.genotypes, expected[i])
+        assert v.genotypes == [expected[i]], (i, v.genotypes, expected[i])
     os.unlink("__o.vcf")
 
 def test_id_field_updates():
@@ -719,6 +840,20 @@ def test_set_pos():
     v.set_pos(22)
     assert v.start == 22
     assert v.POS == 23
+
+def test_set_qual():
+    v = VCF(VCF_PATH)
+    variant = next(v)
+    assert variant.QUAL == 92.0
+
+    variant.QUAL = 30.0
+    assert variant.QUAL == 30.0
+
+    with assert_raises(TypeError):
+        variant.QUAL = "30.0"
+
+    variant.QUAL = None
+    assert variant.QUAL is None, 'variant.QUAL is {}'.format(variant.QUAL)
 
 def test_strict_gt_option_flag():
     test_vcf = '{}/test-strict-gt-option-flag.vcf.gz'.format(HERE)
@@ -787,6 +922,7 @@ def test_alt_repr():
     assert np.all(v.gt_types == np.array([0, 1, 3, 0, 1, 2]))
 
 
+"""
 def test_seqlens():
     v = VCF(VCF_PATH)
     assert v.seqlens == [249250621, 243199373, 198022430, 191154276,
@@ -800,10 +936,75 @@ def test_seqlens():
         155397, 159169, 161147, 161802, 164239, 166566, 169874, 172149, 172294,
         172545, 174588, 179198, 179693, 180455, 182896, 186858, 186861, 187035,
         189789, 191469, 211173, 547496, 171823, 35477943, 5386], v.seqlens
+        """
 
+def test_closed_iter():
+    path = os.path.join(HERE, "test-alt-repr.vcf")
+    vcf = VCF(path, gts012=True, strict_gt=False)
+    vcf.close()
+
+    assert_raises(Exception, next, vcf)
+
+def test_issue72():
+    path = os.path.join(HERE, "test-alt-repr.vcf")
+    vcf = VCF(path, gts012=True, strict_gt=False)
+
+    v = next(vcf)
+    assert v.INFO['DQ'] == 1
+
+    assert v.format('DQ') is not None
 
 def test_is_transition():
     vcf = VCF(VCF_ALTFREQ_PATH)
 
     for r in vcf:
         assert r.is_transition
+
+def test_decomposed():
+    vcf = VCF(os.path.join(HERE, "decomposed.vcf"))
+    v = next(vcf)
+    #0/.	./0	1/.	./1	./.
+    assert np.all(v.gt_types == np.array([vcf.HOM_REF, vcf.HOM_REF, vcf.HET, vcf.HET, vcf.UNKNOWN]))
+
+
+def test_fd():
+
+    fh = open(os.path.join(HERE, "decomposed.vcf"))
+    fn = fh.fileno()
+
+    vcf = VCF(fn)
+    v = next(vcf)
+    assert np.all(v.gt_types == np.array([vcf.HOM_REF, vcf.HOM_REF, vcf.HET, vcf.HET, vcf.UNKNOWN]))
+    fh.close()
+    vcf.close()
+
+
+def test_set_reference():
+    fh = open(os.path.join(HERE, "decomposed.vcf"))
+    fn = fh.fileno()
+
+    vcf = VCF(fn)
+    for v in vcf:
+      v.REF = "CCCCA"
+      assert  "CCCCA" in str(v)
+
+def test_set_alternates():
+    fh = open(os.path.join(HERE, "decomposed.vcf"))
+    fn = fh.fileno()
+
+    vcf = VCF(fn)
+    for v in vcf:
+      v.ALT = "TTT,GGG"
+      assert  "TTT,GGG" in str(v)
+
+      v.ALT = ["AAAC", "CCCA"]
+      assert "AAAC,CCCA" in str(v)
+
+def test_no_seqlen():
+
+    vcf_path = os.path.join(HERE, "no-seq-len.vcf")
+    vcf = VCF(vcf_path)
+    assert vcf.seqnames == ["3"]
+    with assert_raises(AttributeError) as ae:
+        vcf.seqlens
+    assert isinstance(ae.exception, AttributeError)
